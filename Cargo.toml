@@ -47,9 +47,6 @@ cfg-if = "1.0.0"
 sha2 = "0.10.7"
 proptest = "1.2.0"
 
-[features]
-default = ["halo2curves/asm"]
-
 [profile.release]
 debug = 1
 lto = "fat"

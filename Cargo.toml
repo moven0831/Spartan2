@@ -48,7 +48,7 @@ sha2 = "0.10.7"
 proptest = "1.2.0"
 
 [features]
-default = ["halo2curves/asm"]
+default = []
 
 [profile.release]
 debug = 1

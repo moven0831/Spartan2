@@ -129,6 +129,10 @@ impl<F: PrimeField> SparseMatrix<F> {
       nnz,
     }
   }
+
+  pub fn rows(&self) -> usize {
+    self.indptr.len() - 1
+  }
 }
 
 /// Iterator for sparse matrix

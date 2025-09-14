@@ -42,6 +42,26 @@ where
   ck_s: AffineGroupElement<E>,
 }
 
+impl<E: Engine> HyraxCommitmentKey<E>
+where
+  E::GE: DlogGroup,
+{
+  ///
+  pub fn ck_s(&self) -> AffineGroupElement<E> {
+    self.ck_s
+  }
+
+  ///
+  pub fn h(&self) -> AffineGroupElement<E> {
+    self.h
+  }
+
+  ///
+  pub fn ck(&self) -> &[AffineGroupElement<E>] {
+    &self.ck
+  }
+}
+
 /// A type that holds the verifier key for Hyrax commitments
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(bound = "")]
@@ -55,6 +75,25 @@ where
   ck_s: AffineGroupElement<E>,
 }
 
+impl<E: Engine> HyraxVerifierKey<E>
+where
+  E::GE: DlogGroup,
+{
+  ///
+  pub fn ck_s(&self) -> AffineGroupElement<E> {
+    self.ck_s
+  }
+
+  ///
+  pub fn h(&self) -> AffineGroupElement<E> {
+    self.h
+  }
+
+  ///
+  pub fn ck(&self) -> &[AffineGroupElement<E>] {
+    &self.ck
+  }
+}
 /// Structure that holds commitments
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(bound = "")]

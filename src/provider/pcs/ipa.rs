@@ -24,10 +24,23 @@ pub(crate) fn inner_product<T: Field + Send + Sync>(a: &[T], b: &[T]) -> T {
 
 /// An inner product instance consists of a commitment to a vector `a` and another vector `b`
 /// and the claim that c = <a, b>.
+#[derive(Debug, Serialize, Deserialize)]
 pub struct InnerProductInstance<E: Engine> {
   comm_a_vec: E::GE,
   b_vec: Vec<E::Scalar>,
   c: E::Scalar,
+}
+
+impl<E: Engine> InnerProductInstance<E> {
+  ///
+  pub fn comm_a_vec(&self) -> E::GE {
+    self.comm_a_vec
+  }
+
+  ///
+  pub fn c(&self) -> E::Scalar {
+    self.c
+  }
 }
 
 /// Holds witness for the inner product instance.

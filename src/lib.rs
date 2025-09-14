@@ -31,6 +31,8 @@ pub mod provider;
 pub mod spartan;
 pub mod sumcheck;
 pub mod traits;
+pub mod zk_spartan;
+pub mod zk_sumcheck;
 
 /// Start a span + timer, return `(Span, Instant)`.
 macro_rules! start_span {

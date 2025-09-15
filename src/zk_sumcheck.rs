@@ -10,7 +10,6 @@ use crate::{
     multilinear::MultilinearPolynomial,
     univariate::{CompressedUniPoly, UniPoly},
   },
-  provider::T256HyraxEngine,
   start_span,
   traits::{Engine, transcript::TranscriptEngineTrait},
 };
@@ -19,10 +18,6 @@ use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 use std::time::Instant;
 use tracing::{info, info_span};
-
-type E = T256HyraxEngine;
-type Scalar = <T256HyraxEngine as Engine>::Scalar;
-type TE = <T256HyraxEngine as Engine>::TE;
 
 /// 4 k elements is a good cut-off on a 16-core machine.
 const PAR_THRESHOLD: usize = 4 << 10; // 4096
@@ -114,11 +109,11 @@ where
 /// the prover's messages in each round of the sum-check protocol.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(bound = "")]
-pub struct SumcheckProof {
-  compressed_polys: Vec<CompressedUniPoly<Scalar>>,
+pub struct SumcheckProof<E: Engine> {
+  compressed_polys: Vec<CompressedUniPoly<E::Scalar>>,
 }
 
-impl SumcheckProof {
+impl<E: Engine> SumcheckProof<E> {
   /// Verifies a sum-check proof.
   ///
   /// # Arguments
@@ -132,11 +127,11 @@ impl SumcheckProof {
   /// or an error if verification fails.
   pub fn verify(
     &self,
-    claim: Scalar,
+    claim: E::Scalar,
     num_rounds: usize,
     degree_bound: usize,
     transcript: &mut <E as Engine>::TE,
-  ) -> Result<(Scalar, Vec<Scalar>, Vec<Scalar>), SpartanError> {
+  ) -> Result<(E::Scalar, Vec<E::Scalar>, Vec<E::Scalar>), SpartanError> {
     assert!(degree_bound == 2 || degree_bound == 3);
 
     let mut vals = vec![];
@@ -145,7 +140,7 @@ impl SumcheckProof {
     let mut e = claim;
     let mut lc_poly = vec![];
 
-    let mut r: Vec<Scalar> = Vec::new();
+    let mut r: Vec<E::Scalar> = Vec::new();
 
     // verify that there is a univariate polynomial for each round
     if self.compressed_polys.len() != num_rounds {
@@ -189,12 +184,12 @@ impl SumcheckProof {
 
   #[inline]
   fn compute_eval_points_quad<F>(
-    poly_A: &MultilinearPolynomial<Scalar>,
-    poly_B: &MultilinearPolynomial<Scalar>,
+    poly_A: &MultilinearPolynomial<E::Scalar>,
+    poly_B: &MultilinearPolynomial<E::Scalar>,
     comb_func: &F,
-  ) -> (Scalar, Scalar)
+  ) -> (E::Scalar, E::Scalar)
   where
-    F: Fn(&Scalar, &Scalar) -> Scalar + Sync,
+    F: Fn(&E::Scalar, &E::Scalar) -> E::Scalar + Sync,
   {
     let len = poly_A.Z.len() / 2;
 
@@ -226,7 +221,7 @@ impl SumcheckProof {
         acc
       },
       // identity value
-      || (Scalar::ZERO, Scalar::ZERO),
+      || (E::Scalar::ZERO, E::Scalar::ZERO),
     )
   }
 
@@ -244,16 +239,16 @@ impl SumcheckProof {
   /// A tuple containing the sum-check proof, the sequence of verifier challenges,
   /// and the final evaluations of the polynomials.
   pub fn prove_quad<F>(
-    claim: &Scalar,
+    claim: &E::Scalar,
     num_rounds: usize,
-    masks: &[[Scalar; 2]],
-    poly_A: &mut MultilinearPolynomial<Scalar>,
-    poly_B: &mut MultilinearPolynomial<Scalar>,
+    masks: &[[E::Scalar; 2]],
+    poly_A: &mut MultilinearPolynomial<E::Scalar>,
+    poly_B: &mut MultilinearPolynomial<E::Scalar>,
     comb_func: F,
     transcript: &mut <E as Engine>::TE,
-  ) -> Result<(Self, Vec<Scalar>, Vec<Scalar>, Vec<Scalar>), SpartanError>
+  ) -> Result<(Self, Vec<E::Scalar>, Vec<E::Scalar>, Vec<E::Scalar>), SpartanError>
   where
-    F: Fn(&Scalar, &Scalar) -> Scalar + Sync,
+    F: Fn(&E::Scalar, &E::Scalar) -> E::Scalar + Sync,
   {
     let degree_bound = 2;
 
@@ -262,10 +257,10 @@ impl SumcheckProof {
     //   transcript.absorb(masks)
     // }
 
-    let mut r: Vec<Scalar> = Vec::new();
+    let mut r: Vec<E::Scalar> = Vec::new();
     let mut lc_poly = vec![];
 
-    let mut polys: Vec<CompressedUniPoly<Scalar>> = Vec::new();
+    let mut polys: Vec<CompressedUniPoly<E::Scalar>> = Vec::new();
     let mut claim_per_round = *claim;
     assert_eq!(masks.len(), num_rounds);
 
@@ -324,21 +319,21 @@ impl SumcheckProof {
   /// Proves a batch of quadratic combinations of two multilinear polynomials.
   #[allow(clippy::too_many_arguments)]
   pub fn prove_quad_batched<F>(
-    challenge: &Scalar,
-    claims: &[Scalar; 2],
+    challenge: &E::Scalar,
+    claims: &[E::Scalar; 2],
     num_rounds: usize,
-    poly_A_0: &mut MultilinearPolynomial<Scalar>,
-    poly_A_1: &mut MultilinearPolynomial<Scalar>,
-    poly_B_0: &mut MultilinearPolynomial<Scalar>,
-    poly_B_1: &mut MultilinearPolynomial<Scalar>,
+    poly_A_0: &mut MultilinearPolynomial<E::Scalar>,
+    poly_A_1: &mut MultilinearPolynomial<E::Scalar>,
+    poly_B_0: &mut MultilinearPolynomial<E::Scalar>,
+    poly_B_1: &mut MultilinearPolynomial<E::Scalar>,
     comb_func: F,
-    transcript: &mut TE,
-  ) -> Result<(Self, Vec<Scalar>, Vec<Scalar>), SpartanError>
+    transcript: &mut E::TE,
+  ) -> Result<(Self, Vec<E::Scalar>, Vec<E::Scalar>), SpartanError>
   where
-    F: Fn(&Scalar, &Scalar) -> Scalar + Sync,
+    F: Fn(&E::Scalar, &E::Scalar) -> E::Scalar + Sync,
   {
-    let mut r: Vec<Scalar> = Vec::new();
-    let mut polys: Vec<CompressedUniPoly<Scalar>> = Vec::new();
+    let mut r: Vec<E::Scalar> = Vec::new();
+    let mut polys: Vec<CompressedUniPoly<E::Scalar>> = Vec::new();
 
     // compute the joint claim for both sum-check instances
     let mut claim_per_round = claims[0] + *challenge * claims[1];
@@ -421,14 +416,14 @@ impl SumcheckProof {
   /// # Returns
   /// A tuple containing the evaluations at points 0, 2, and 3.
   fn compute_eval_points_cubic_with_additive_term<F>(
-    poly_A: &MultilinearPolynomial<Scalar>,
-    poly_B: &MultilinearPolynomial<Scalar>,
-    poly_C: &MultilinearPolynomial<Scalar>,
-    poly_D: &MultilinearPolynomial<Scalar>,
+    poly_A: &MultilinearPolynomial<E::Scalar>,
+    poly_B: &MultilinearPolynomial<E::Scalar>,
+    poly_C: &MultilinearPolynomial<E::Scalar>,
+    poly_D: &MultilinearPolynomial<E::Scalar>,
     comb_func: &F,
-  ) -> (Scalar, Scalar, Scalar)
+  ) -> (E::Scalar, E::Scalar, E::Scalar)
   where
-    F: Fn(&Scalar, &Scalar, &Scalar, &Scalar) -> Scalar + Sync,
+    F: Fn(&E::Scalar, &E::Scalar, &E::Scalar, &E::Scalar) -> E::Scalar + Sync,
   {
     let len = poly_A.Z.len() / 2;
     par_for(
@@ -477,7 +472,7 @@ impl SumcheckProof {
         acc.2 += val.2;
         acc
       },
-      || (Scalar::ZERO, Scalar::ZERO, Scalar::ZERO),
+      || (E::Scalar::ZERO, E::Scalar::ZERO, E::Scalar::ZERO),
     )
   }
 
@@ -498,25 +493,25 @@ impl SumcheckProof {
   /// and the final evaluations of the polynomials.
   #[allow(clippy::too_many_arguments)]
   pub fn prove_cubic_with_additive_term<F>(
-    claim: &Scalar,
+    claim: &E::Scalar,
     num_rounds: usize,
-    masks: &[[Scalar; 3]],
-    poly_A: &mut MultilinearPolynomial<Scalar>,
-    poly_B: &mut MultilinearPolynomial<Scalar>,
-    poly_C: &mut MultilinearPolynomial<Scalar>,
-    poly_D: &mut MultilinearPolynomial<Scalar>,
+    masks: &[[E::Scalar; 3]],
+    poly_A: &mut MultilinearPolynomial<E::Scalar>,
+    poly_B: &mut MultilinearPolynomial<E::Scalar>,
+    poly_C: &mut MultilinearPolynomial<E::Scalar>,
+    poly_D: &mut MultilinearPolynomial<E::Scalar>,
     comb_func: F,
     transcript: &mut <E as Engine>::TE,
-  ) -> Result<(Self, Vec<Scalar>, Vec<Scalar>, Vec<Scalar>), SpartanError>
+  ) -> Result<(Self, Vec<E::Scalar>, Vec<E::Scalar>, Vec<E::Scalar>), SpartanError>
   where
-    F: Fn(&Scalar, &Scalar, &Scalar, &Scalar) -> Scalar + Sync,
+    F: Fn(&E::Scalar, &E::Scalar, &E::Scalar, &E::Scalar) -> E::Scalar + Sync,
   {
     let degree_bound = 3;
 
-    let mut r: Vec<Scalar> = Vec::new();
+    let mut r: Vec<E::Scalar> = Vec::new();
     let mut lc_poly = vec![];
 
-    let mut polys: Vec<CompressedUniPoly<Scalar>> = Vec::new();
+    let mut polys: Vec<CompressedUniPoly<E::Scalar>> = Vec::new();
     let mut claim_per_round = *claim;
 
     assert_eq!(masks.len(), num_rounds);
@@ -589,24 +584,24 @@ impl SumcheckProof {
   /// Generates a batched sum-check proof for a cubic combination with additive term of four multilinear polynomials.
   #[allow(clippy::too_many_arguments)]
   pub fn prove_cubic_with_additive_term_batched<F>(
-    challenge: &Scalar,
-    claims: &[Scalar; 2],
+    challenge: &E::Scalar,
+    claims: &[E::Scalar; 2],
     num_rounds: usize,
-    poly_A: &mut MultilinearPolynomial<Scalar>,
-    poly_B_0: &mut MultilinearPolynomial<Scalar>,
-    poly_B_1: &mut MultilinearPolynomial<Scalar>,
-    poly_C_0: &mut MultilinearPolynomial<Scalar>,
-    poly_C_1: &mut MultilinearPolynomial<Scalar>,
-    poly_D_0: &mut MultilinearPolynomial<Scalar>,
-    poly_D_1: &mut MultilinearPolynomial<Scalar>,
+    poly_A: &mut MultilinearPolynomial<E::Scalar>,
+    poly_B_0: &mut MultilinearPolynomial<E::Scalar>,
+    poly_B_1: &mut MultilinearPolynomial<E::Scalar>,
+    poly_C_0: &mut MultilinearPolynomial<E::Scalar>,
+    poly_C_1: &mut MultilinearPolynomial<E::Scalar>,
+    poly_D_0: &mut MultilinearPolynomial<E::Scalar>,
+    poly_D_1: &mut MultilinearPolynomial<E::Scalar>,
     comb_func: F,
-    transcript: &mut <E as Engine>::TE,
-  ) -> Result<(Self, Vec<Scalar>, Vec<Scalar>), SpartanError>
+    transcript: &mut E::TE,
+  ) -> Result<(Self, Vec<E::Scalar>, Vec<E::Scalar>), SpartanError>
   where
-    F: Fn(&Scalar, &Scalar, &Scalar, &Scalar) -> Scalar + Sync,
+    F: Fn(&E::Scalar, &E::Scalar, &E::Scalar, &E::Scalar) -> E::Scalar + Sync,
   {
-    let mut r: Vec<Scalar> = Vec::new();
-    let mut polys: Vec<CompressedUniPoly<Scalar>> = Vec::new();
+    let mut r: Vec<E::Scalar> = Vec::new();
+    let mut polys: Vec<CompressedUniPoly<E::Scalar>> = Vec::new();
 
     // compute the joint claim for both sum-check instances
     let mut claim_per_round = claims[0] + *challenge * claims[1];

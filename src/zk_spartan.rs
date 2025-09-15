@@ -15,12 +15,11 @@ use crate::{
     multilinear::{MultilinearPolynomial, SparsePolynomial},
   },
   provider::{
-    T256HyraxEngine,
     pcs::{
       hyrax_pc::HyraxPCS,
       ipa::{InnerProductArgumentLinear, InnerProductInstance, InnerProductWitness},
     },
-    traits::DlogGroupExt,
+    traits::{DlogGroup, DlogGroupExt},
   },
   r1cs::{SparseMatrix, SplitR1CSInstance, SplitR1CSShape},
   start_span,
@@ -34,6 +33,7 @@ use crate::{
   zk_sumcheck::SumcheckProof,
 };
 use ff::Field;
+use group::prime::{PrimeCurve, PrimeCurveAffine};
 use once_cell::sync::OnceCell;
 use rand_core::OsRng;
 use rayon::prelude::*;
@@ -41,21 +41,16 @@ use serde::{Deserialize, Serialize};
 use std::time::Instant;
 use tracing::{debug, info, info_span};
 
-type E = T256HyraxEngine;
-type Scalar = <T256HyraxEngine as Engine>::Scalar;
-type PCS = <E as Engine>::PCS;
-type TE = <E as Engine>::TE;
-
 /// A type that represents the prover's key
 #[derive(Serialize, Deserialize)]
 #[serde(bound = "")]
-pub struct SpartanProverKey {
+pub struct SpartanProverKey<E: Engine> {
   ck: CommitmentKey<E>,
   S: SplitR1CSShape<E>,
   vk_digest: SpartanDigest, // digest of the verifier's key
 }
 
-impl SpartanProverKey {
+impl<E: Engine> SpartanProverKey<E> {
   /// Returns sizes associated with the SplitR1CSShape.
   /// It returns an array of 10 elements containing:
   /// [num_cons_unpadded, num_shared_unpadded, num_precommitted_unpadded, num_rest_unpadded,
@@ -69,16 +64,16 @@ impl SpartanProverKey {
 /// A type that represents the verifier's key
 #[derive(Serialize, Deserialize)]
 #[serde(bound = "")]
-pub struct SpartanVerifierKey {
-  vk_ee: <HyraxPCS<E> as PCSEngineTrait<E>>::VerifierKey,
+pub struct SpartanVerifierKey<E: Engine> {
+  vk_ee: <E::PCS as PCSEngineTrait<E>>::VerifierKey,
   S: SplitR1CSShape<E>,
   #[serde(skip, default = "OnceCell::new")]
   digest: OnceCell<SpartanDigest>,
 }
 
-impl SimpleDigestible for SpartanVerifierKey {}
+impl<E: Engine> SimpleDigestible for SpartanVerifierKey<E> {}
 
-impl DigestHelperTrait<E> for SpartanVerifierKey {
+impl<E: Engine> DigestHelperTrait<E> for SpartanVerifierKey<E> {
   /// Returns the digest of the verifier's key.
   fn digest(&self) -> Result<SpartanDigest, SpartanError> {
     self
@@ -95,13 +90,13 @@ impl DigestHelperTrait<E> for SpartanVerifierKey {
 }
 
 /// Binds "row" variables of (A, B, C) matrices viewed as 2d multilinear polynomials
-pub(crate) fn compute_eval_table_sparse(
+pub(crate) fn compute_eval_table_sparse<E: Engine>(
   S: &SplitR1CSShape<E>,
-  rx: &[Scalar],
-) -> (Vec<Scalar>, Vec<Scalar>, Vec<Scalar>) {
+  rx: &[E::Scalar],
+) -> (Vec<E::Scalar>, Vec<E::Scalar>, Vec<E::Scalar>) {
   assert_eq!(rx.len(), S.num_cons);
 
-  let inner = |M: &SparseMatrix<Scalar>, M_evals: &mut Vec<Scalar>| {
+  let inner = |M: &SparseMatrix<E::Scalar>, M_evals: &mut Vec<E::Scalar>| {
     for (row_idx, ptrs) in M.indptr.windows(2).enumerate() {
       for (val, col_idx) in M.get_row_unchecked(ptrs.try_into().unwrap()) {
         M_evals[*col_idx] += rx[row_idx] * val;
@@ -112,19 +107,19 @@ pub(crate) fn compute_eval_table_sparse(
   let num_vars = S.num_shared + S.num_precommitted + S.num_rest;
   let (A_evals, (B_evals, C_evals)) = rayon::join(
     || {
-      let mut A_evals: Vec<Scalar> = vec![Scalar::ZERO; 2 * num_vars];
+      let mut A_evals: Vec<E::Scalar> = vec![E::Scalar::ZERO; 2 * num_vars];
       inner(&S.A, &mut A_evals);
       A_evals
     },
     || {
       rayon::join(
         || {
-          let mut B_evals: Vec<Scalar> = vec![Scalar::ZERO; 2 * num_vars];
+          let mut B_evals: Vec<E::Scalar> = vec![E::Scalar::ZERO; 2 * num_vars];
           inner(&S.B, &mut B_evals);
           B_evals
         },
         || {
-          let mut C_evals: Vec<Scalar> = vec![Scalar::ZERO; 2 * num_vars];
+          let mut C_evals: Vec<E::Scalar> = vec![E::Scalar::ZERO; 2 * num_vars];
           inner(&S.C, &mut C_evals);
           C_evals
         },
@@ -147,22 +142,30 @@ pub struct PrepSNARK<E: Engine> {
 /// the commitment to a vector viewed as a polynomial commitment
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(bound = "")]
-pub struct R1CSSNARK {
+pub struct R1CSSNARK<E: Engine>
+where
+  E::GE: DlogGroupExt,
+{
   U: SplitR1CSInstance<E>,
-  sc_proof_outer: SumcheckProof,
+  sc_proof_outer: SumcheckProof<E>,
   ipa_proof_outer: InnerProductArgumentLinear<E>,
   ipa_instance_outer: InnerProductInstance<E>,
-  claims_outer: (Scalar, Scalar, Scalar),
-  sc_proof_inner: SumcheckProof,
+  claims_outer: (E::Scalar, E::Scalar, E::Scalar),
+  sc_proof_inner: SumcheckProof<E>,
   ipa_proof_inner: InnerProductArgumentLinear<E>,
   ipa_instance_inner: InnerProductInstance<E>,
-  eval_W: Scalar,
-  eval_arg: <PCS as PCSEngineTrait<E>>::EvaluationArgument,
+  eval_W: E::Scalar,
+  eval_arg: <E::PCS as PCSEngineTrait<E>>::EvaluationArgument,
 }
 
-impl R1CSSNARKTrait<E> for R1CSSNARK {
-  type ProverKey = SpartanProverKey;
-  type VerifierKey = SpartanVerifierKey;
+impl<E: Engine<PCS = HyraxPCS<E>>> R1CSSNARKTrait<E> for R1CSSNARK<E>
+where
+  E::GE: DlogGroupExt,
+  E::GE: PrimeCurve<Affine = <E::GE as DlogGroup>::AffineGroupElement, Scalar = E::Scalar>,
+  <E::GE as PrimeCurve>::Affine: Send + Sync + PrimeCurveAffine<Scalar = E::Scalar, Curve = E::GE>,
+{
+  type ProverKey = SpartanProverKey<E>;
+  type VerifierKey = SpartanVerifierKey<E>;
   type PrepSNARK = PrepSNARK<E>;
 
   fn setup<C: SpartanCircuit<E>>(
@@ -225,16 +228,16 @@ impl R1CSSNARKTrait<E> for R1CSSNARK {
     let mut outer_sumcheck_masks = vec![];
     for _ in 0..num_rounds_x {
       let mask = [
-        Scalar::random(&mut OsRng),
-        Scalar::random(&mut OsRng),
-        Scalar::random(&mut OsRng),
+        E::Scalar::random(&mut OsRng),
+        E::Scalar::random(&mut OsRng),
+        E::Scalar::random(&mut OsRng),
       ];
       outer_sumcheck_masks.push(mask);
     }
 
     let mut inner_sumcheck_masks = vec![];
     for _ in 0..num_rounds_y {
-      let mask = [Scalar::random(&mut OsRng), Scalar::random(&mut OsRng)];
+      let mask = [E::Scalar::random(&mut OsRng), E::Scalar::random(&mut OsRng)];
       inner_sumcheck_masks.push(mask);
     }
 
@@ -253,7 +256,7 @@ impl R1CSSNARKTrait<E> for R1CSSNARK {
     // compute the full satisfying assignment by concatenating W.W, 1, and U.X
     let mut z = [
       W.W.clone(),
-      vec![Scalar::ONE],
+      vec![E::Scalar::ONE],
       U.public_values.clone(),
       U.challenges.clone(),
     ]
@@ -295,11 +298,11 @@ impl R1CSSNARKTrait<E> for R1CSSNARK {
     let (_sc_span, sc_t) = start_span!("outer_sumcheck");
 
     let comb_func_outer =
-      |poly_A_comp: &Scalar,
-       poly_B_comp: &Scalar,
-       poly_C_comp: &Scalar,
-       poly_D_comp: &Scalar|
-       -> Scalar { *poly_A_comp * (*poly_B_comp * *poly_C_comp - *poly_D_comp) };
+      |poly_A_comp: &E::Scalar,
+       poly_B_comp: &E::Scalar,
+       poly_C_comp: &E::Scalar,
+       poly_D_comp: &E::Scalar|
+       -> E::Scalar { *poly_A_comp * (*poly_B_comp * *poly_C_comp - *poly_D_comp) };
 
     let masks = outer_sumcheck_masks
       .iter()
@@ -309,14 +312,14 @@ impl R1CSSNARKTrait<E> for R1CSSNARK {
 
     let comm_masks =
       <E as Engine>::GE::vartime_multiscalar_mul(&masks, &pk.ck.ck()[..masks.len()], true)?;
-    let r_a = Scalar::random(&mut OsRng);
+    let r_a = E::Scalar::random(&mut OsRng);
     let comm_masks = comm_masks + pk.ck.h() * r_a;
 
     transcript.absorb(b"outer sumcheck masks", &comm_masks);
 
     let (sc_proof_outer, r_x, claims_outer, outer_lc_poly) =
       SumcheckProof::prove_cubic_with_additive_term(
-        &Scalar::ZERO, // claim is zero
+        &E::Scalar::ZERO, // claim is zero
         num_rounds_x,
         &outer_sumcheck_masks,
         &mut poly_tau,
@@ -331,7 +334,7 @@ impl R1CSSNARKTrait<E> for R1CSSNARK {
       let mask_eval = masks
         .iter()
         .zip(outer_lc_poly.iter())
-        .map(|(mask, lc)| mask * lc)
+        .map(|(mask, lc)| *mask * lc)
         .sum();
 
       let ipa_instance = InnerProductInstance::<E>::new(&comm_masks, &outer_lc_poly, &mask_eval);
@@ -351,7 +354,7 @@ impl R1CSSNARKTrait<E> for R1CSSNARK {
     };
 
     // claims from the end of sum-check
-    let (claim_Az, claim_Bz, claim_Cz): (Scalar, Scalar, Scalar) =
+    let (claim_Az, claim_Bz, claim_Cz): (E::Scalar, E::Scalar, E::Scalar) =
       (claims_outer[1], claims_outer[2], claims_outer[3]);
     transcript.absorb(b"claims_outer", &[claim_Az, claim_Bz, claim_Cz].as_slice());
     info!(elapsed_ms = %sc_t.elapsed().as_millis(), "outer_sumcheck");
@@ -376,12 +379,12 @@ impl R1CSSNARKTrait<E> for R1CSSNARK {
     let poly_ABC = (0..evals_A.len())
       .into_par_iter()
       .map(|i| evals_A[i] + r * evals_B[i] + r * r * evals_C[i])
-      .collect::<Vec<Scalar>>();
+      .collect::<Vec<E::Scalar>>();
     info!(elapsed_ms = %abc_t.elapsed().as_millis(), "prepare_poly_ABC");
 
     let (_z_span, z_t) = start_span!("prepare_poly_z");
     let poly_z = {
-      z.resize(num_vars * 2, Scalar::ZERO);
+      z.resize(num_vars * 2, E::Scalar::ZERO);
       z
     };
     info!(elapsed_ms = %z_t.elapsed().as_millis(), "prepare_poly_z");
@@ -395,8 +398,9 @@ impl R1CSSNARKTrait<E> for R1CSSNARK {
       poly_ABC.len(),
       poly_z.len()
     );
-    let comb_func =
-      |poly_A_comp: &Scalar, poly_B_comp: &Scalar| -> Scalar { *poly_A_comp * *poly_B_comp };
+    let comb_func = |poly_A_comp: &E::Scalar, poly_B_comp: &E::Scalar| -> E::Scalar {
+      *poly_A_comp * *poly_B_comp
+    };
 
     let masks = inner_sumcheck_masks
       .iter()
@@ -406,7 +410,7 @@ impl R1CSSNARKTrait<E> for R1CSSNARK {
 
     let comm_masks =
       <E as Engine>::GE::vartime_multiscalar_mul(&masks, &pk.ck.ck()[..masks.len()], true)?;
-    let r_a = Scalar::random(&mut OsRng);
+    let r_a = E::Scalar::random(&mut OsRng);
     let comm_masks = comm_masks + pk.ck.h() * r_a;
 
     transcript.absorb(b"inner sumcheck masks", &comm_masks);
@@ -426,7 +430,7 @@ impl R1CSSNARKTrait<E> for R1CSSNARK {
       let mask_eval = masks
         .iter()
         .zip(inner_lc_poly.iter())
-        .map(|(mask, lc)| mask * lc)
+        .map(|(mask, lc)| *mask * lc)
         .sum();
 
       let ipa_instance = InnerProductInstance::<E>::new(&comm_masks, &inner_lc_poly, &mask_eval);
@@ -447,7 +451,7 @@ impl R1CSSNARKTrait<E> for R1CSSNARK {
 
     let (_pcs_span, pcs_t) = start_span!("pcs_prove");
     let U_regular = U.to_regular_instance()?;
-    let (eval_W, eval_arg) = PCS::prove(
+    let (eval_W, eval_arg) = E::PCS::prove(
       &pk.ck,
       &mut transcript,
       &U_regular.comm_W,
@@ -472,9 +476,9 @@ impl R1CSSNARKTrait<E> for R1CSSNARK {
   }
 
   /// verifies a proof of satisfiability of a `RelaxedR1CS` instance
-  fn verify(&self, vk: &Self::VerifierKey) -> Result<Vec<Scalar>, SpartanError> {
+  fn verify(&self, vk: &Self::VerifierKey) -> Result<Vec<E::Scalar>, SpartanError> {
     let (_verify_span, verify_t) = start_span!("r1cs_snark_verify");
-    let mut transcript = TE::new(b"R1CSSNARK");
+    let mut transcript = E::TE::new(b"R1CSSNARK");
 
     // append the digest of R1CS matrices
     transcript.absorb(b"vk", &vk.digest()?);
@@ -511,7 +515,7 @@ impl R1CSSNARKTrait<E> for R1CSSNARK {
     let (claim_outer_final, r_x, _outer_lc_poly) =
       self
         .sc_proof_outer
-        .verify(Scalar::ZERO, num_rounds_x, 3, &mut transcript)?;
+        .verify(E::Scalar::ZERO, num_rounds_x, 3, &mut transcript)?;
 
     self.ipa_proof_outer.verify(
       &vk.vk_ee.ck()[..num_rounds_x * 3],
@@ -571,51 +575,53 @@ impl R1CSSNARKTrait<E> for R1CSSNARK {
     let eval_Z = {
       let eval_X = {
         // public IO is (1, X)
-        let X = vec![Scalar::ONE]
+        let X = vec![E::Scalar::ONE]
           .into_iter()
           .chain(U_regular.X.iter().cloned())
-          .collect::<Vec<Scalar>>();
+          .collect::<Vec<E::Scalar>>();
         SparsePolynomial::new(num_vars.log_2(), X).evaluate(&r_y[1..])
       };
-      (Scalar::ONE - r_y[0]) * self.eval_W + r_y[0] * eval_X
+      (E::Scalar::ONE - r_y[0]) * self.eval_W + r_y[0] * eval_X
     };
 
     // compute evaluations of R1CS matrices
     let (_matrix_eval_span, matrix_eval_t) = start_span!("matrix_evaluations");
-    let multi_evaluate =
-      |M_vec: &[&SparseMatrix<Scalar>], r_x: &[Scalar], r_y: &[Scalar]| -> Vec<Scalar> {
-        let evaluate_with_table =
-          |M: &SparseMatrix<Scalar>, T_x: &[Scalar], T_y: &[Scalar]| -> Scalar {
-            M.indptr
-              .par_windows(2)
-              .enumerate()
-              .map(|(row_idx, ptrs)| {
-                M.get_row_unchecked(ptrs.try_into().unwrap())
-                  .map(|(val, col_idx)| {
-                    let prod = T_x[row_idx] * T_y[*col_idx];
-                    if *val == Scalar::ONE {
-                      prod
-                    } else if *val == -Scalar::ONE {
-                      -prod
-                    } else {
-                      prod * val
-                    }
-                  })
-                  .sum::<Scalar>()
-              })
-              .sum()
-          };
+    let multi_evaluate = |M_vec: &[&SparseMatrix<E::Scalar>],
+                          r_x: &[E::Scalar],
+                          r_y: &[E::Scalar]|
+     -> Vec<E::Scalar> {
+      let evaluate_with_table =
+        |M: &SparseMatrix<E::Scalar>, T_x: &[E::Scalar], T_y: &[E::Scalar]| -> E::Scalar {
+          M.indptr
+            .par_windows(2)
+            .enumerate()
+            .map(|(row_idx, ptrs)| {
+              M.get_row_unchecked(ptrs.try_into().unwrap())
+                .map(|(val, col_idx)| {
+                  let prod = T_x[row_idx] * T_y[*col_idx];
+                  if *val == E::Scalar::ONE {
+                    prod
+                  } else if *val == -E::Scalar::ONE {
+                    -prod
+                  } else {
+                    prod * val
+                  }
+                })
+                .sum::<E::Scalar>()
+            })
+            .sum()
+        };
 
-        let (T_x, T_y) = rayon::join(
-          || EqPolynomial::evals_from_points(r_x),
-          || EqPolynomial::evals_from_points(r_y),
-        );
+      let (T_x, T_y) = rayon::join(
+        || EqPolynomial::evals_from_points(r_x),
+        || EqPolynomial::evals_from_points(r_y),
+      );
 
-        (0..M_vec.len())
-          .into_par_iter()
-          .map(|i| evaluate_with_table(M_vec[i], &T_x, &T_y))
-          .collect()
-      };
+      (0..M_vec.len())
+        .into_par_iter()
+        .map(|i| evaluate_with_table(M_vec[i], &T_x, &T_y))
+        .collect()
+    };
 
     let evals = multi_evaluate(&[&vk.S.A, &vk.S.B, &vk.S.C], &r_x, &r_y);
 
@@ -648,20 +654,19 @@ impl R1CSSNARKTrait<E> for R1CSSNARK {
 mod tests {
   use super::*;
   use bellpepper_core::{ConstraintSystem, SynthesisError, num::AllocatedNum};
-  use tracing_subscriber::EnvFilter;
 
   #[derive(Clone, Debug, Default)]
   struct CubicCircuit {}
 
-  impl SpartanCircuit<E> for CubicCircuit {
+  impl<E: Engine> SpartanCircuit<E> for CubicCircuit {
     fn public_values(&self) -> Result<Vec<<E as Engine>::Scalar>, SynthesisError> {
-      Ok(vec![Scalar::from(15u64)])
+      Ok(vec![E::Scalar::from(15u64)])
     }
 
-    fn shared<CS: ConstraintSystem<Scalar>>(
+    fn shared<CS: ConstraintSystem<E::Scalar>>(
       &self,
       _: &mut CS,
-    ) -> Result<Vec<AllocatedNum<Scalar>>, SynthesisError> {
+    ) -> Result<Vec<AllocatedNum<E::Scalar>>, SynthesisError> {
       // In this example, we do not have shared variables.
       Ok(vec![])
     }
@@ -669,7 +674,7 @@ mod tests {
     fn precommitted<CS: ConstraintSystem<<E as Engine>::Scalar>>(
       &self,
       _: &mut CS,
-      _: &[AllocatedNum<Scalar>], // shared variables, if any
+      _: &[AllocatedNum<E::Scalar>], // shared variables, if any
     ) -> Result<Vec<AllocatedNum<<E as Engine>::Scalar>>, SynthesisError> {
       // In this example, we do not have precommitted variables.
       Ok(vec![])
@@ -680,19 +685,19 @@ mod tests {
       0
     }
 
-    fn synthesize<CS: ConstraintSystem<Scalar>>(
+    fn synthesize<CS: ConstraintSystem<E::Scalar>>(
       &self,
       cs: &mut CS,
-      _: &[AllocatedNum<Scalar>],
-      _: &[AllocatedNum<Scalar>],
-      _: Option<&[Scalar]>,
+      _: &[AllocatedNum<E::Scalar>],
+      _: &[AllocatedNum<E::Scalar>],
+      _: Option<&[E::Scalar]>,
     ) -> Result<(), SynthesisError> {
       // Consider a cubic equation: `x^3 + x + 5 = y`, where `x` and `y` are respectively the input and output.
-      let x = AllocatedNum::alloc(cs.namespace(|| "x"), || Ok(Scalar::ONE + Scalar::ONE))?;
+      let x = AllocatedNum::alloc(cs.namespace(|| "x"), || Ok(E::Scalar::ONE + E::Scalar::ONE))?;
       let x_sq = x.square(cs.namespace(|| "x_sq"))?;
       let x_cu = x_sq.mul(cs.namespace(|| "x_cu"), &x)?;
       let y = AllocatedNum::alloc(cs.namespace(|| "y"), || {
-        Ok(x_cu.get_value().unwrap() + x.get_value().unwrap() + Scalar::from(5u64))
+        Ok(x_cu.get_value().unwrap() + x.get_value().unwrap() + E::Scalar::from(5u64))
       })?;
 
       cs.enforce(
@@ -718,17 +723,16 @@ mod tests {
 
   #[test]
   fn test_snark() {
-    tracing_subscriber::fmt()
-    .with_target(false)
-    .with_ansi(true)                // no bold colour codes
-    .with_env_filter(EnvFilter::from_default_env())
-    .init();
+    type E = crate::provider::PallasHyraxEngine;
+    type S = R1CSSNARK<E>;
+    test_snark_with::<E, S>();
 
-    type S2 = R1CSSNARK;
-    test_snark_with::<S2>();
+    type E2 = crate::provider::T256HyraxEngine;
+    type S2 = R1CSSNARK<E2>;
+    test_snark_with::<E2, S2>();
   }
 
-  fn test_snark_with<S: R1CSSNARKTrait<E>>() {
+  fn test_snark_with<E: Engine, S: R1CSSNARKTrait<E>>() {
     let circuit = CubicCircuit::default();
 
     // produce keys

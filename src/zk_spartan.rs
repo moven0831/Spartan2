@@ -21,7 +21,7 @@ use crate::{
     },
     traits::{DlogGroup, DlogGroupExt},
   },
-  r1cs::{SparseMatrix, SplitR1CSInstance, SplitR1CSShape},
+  r1cs::{R1CSWitness, SparseMatrix, SplitR1CSInstance, SplitR1CSShape},
   start_span,
   traits::{
     Engine,
@@ -218,29 +218,6 @@ where
         reason: format!("Circuit does not provide public IO: {e}"),
       })?;
 
-    let num_vars = pk.S.num_shared + pk.S.num_precommitted + pk.S.num_rest;
-
-    let (num_rounds_x, num_rounds_y) = (
-      usize::try_from(pk.S.num_cons.ilog2()).unwrap(),
-      (usize::try_from(num_vars.ilog2()).unwrap() + 1),
-    );
-
-    let mut outer_sumcheck_masks = vec![];
-    for _ in 0..num_rounds_x {
-      let mask = [
-        E::Scalar::random(&mut OsRng),
-        E::Scalar::random(&mut OsRng),
-        E::Scalar::random(&mut OsRng),
-      ];
-      outer_sumcheck_masks.push(mask);
-    }
-
-    let mut inner_sumcheck_masks = vec![];
-    for _ in 0..num_rounds_y {
-      let mask = [E::Scalar::random(&mut OsRng), E::Scalar::random(&mut OsRng)];
-      inner_sumcheck_masks.push(mask);
-    }
-
     // absorb the public values into the transcript
     transcript.absorb(b"public_values", &public_values.as_slice());
 
@@ -253,226 +230,7 @@ where
       &mut transcript,
     )?;
 
-    // compute the full satisfying assignment by concatenating W.W, 1, and U.X
-    let mut z = [
-      W.W.clone(),
-      vec![E::Scalar::ONE],
-      U.public_values.clone(),
-      U.challenges.clone(),
-    ]
-    .concat();
-
-    let num_vars = pk.S.num_shared + pk.S.num_precommitted + pk.S.num_rest;
-    let (num_rounds_x, num_rounds_y) = (
-      usize::try_from(pk.S.num_cons.ilog2()).unwrap(),
-      (usize::try_from(num_vars.ilog2()).unwrap() + 1),
-    );
-
-    // outer sum-check preparation
-    let tau = (0..num_rounds_x)
-      .map(|_i| transcript.squeeze(b"t"))
-      .collect::<Result<EqPolynomial<_>, SpartanError>>()?;
-
-    let (_poly_tau_span, poly_tau_t) = start_span!("prepare_poly_tau");
-    let mut poly_tau = MultilinearPolynomial::new(tau.evals());
-    info!(elapsed_ms = %poly_tau_t.elapsed().as_millis(), "prepare_poly_tau");
-
-    let (_mv_span, mv_t) = start_span!("matrix_vector_multiply");
-    let (Az, Bz, Cz) = pk.S.multiply_vec(&z)?;
-    info!(
-      elapsed_ms = %mv_t.elapsed().as_millis(),
-      constraints = %pk.S.num_cons,
-      vars = %num_vars,
-      "matrix_vector_multiply"
-    );
-
-    let (_mp_span, mp_t) = start_span!("prepare_multilinear_polys");
-    let (mut poly_Az, mut poly_Bz, mut poly_Cz) = (
-      MultilinearPolynomial::new(Az),
-      MultilinearPolynomial::new(Bz),
-      MultilinearPolynomial::new(Cz),
-    );
-    info!(elapsed_ms = %mp_t.elapsed().as_millis(), "prepare_multilinear_polys");
-
-    // outer sum-check
-    let (_sc_span, sc_t) = start_span!("outer_sumcheck");
-
-    let comb_func_outer =
-      |poly_A_comp: &E::Scalar,
-       poly_B_comp: &E::Scalar,
-       poly_C_comp: &E::Scalar,
-       poly_D_comp: &E::Scalar|
-       -> E::Scalar { *poly_A_comp * (*poly_B_comp * *poly_C_comp - *poly_D_comp) };
-
-    let masks = outer_sumcheck_masks
-      .iter()
-      .flatten()
-      .copied()
-      .collect::<Vec<_>>();
-
-    let comm_masks =
-      <E as Engine>::GE::vartime_multiscalar_mul(&masks, &pk.ck.ck()[..masks.len()], true)?;
-    let r_a = E::Scalar::random(&mut OsRng);
-    let comm_masks = comm_masks + pk.ck.h() * r_a;
-
-    transcript.absorb(b"outer sumcheck masks", &comm_masks);
-
-    let (sc_proof_outer, r_x, claims_outer, outer_lc_poly) =
-      SumcheckProof::prove_cubic_with_additive_term(
-        &E::Scalar::ZERO, // claim is zero
-        num_rounds_x,
-        &outer_sumcheck_masks,
-        &mut poly_tau,
-        &mut poly_Az,
-        &mut poly_Bz,
-        &mut poly_Cz,
-        comb_func_outer,
-        &mut transcript,
-      )?;
-
-    let (ipa_proof_outer, ipa_instance_outer) = {
-      let mask_eval = masks
-        .iter()
-        .zip(outer_lc_poly.iter())
-        .map(|(mask, lc)| *mask * lc)
-        .sum();
-
-      let ipa_instance = InnerProductInstance::<E>::new(&comm_masks, &outer_lc_poly, &mask_eval);
-
-      let ipa_witness = InnerProductWitness::<E>::new(&masks, &r_a);
-
-      let ipa_proof = InnerProductArgumentLinear::<E>::prove(
-        &pk.ck.ck()[..masks.len()],
-        &pk.ck.h(),
-        &pk.ck.ck_s(),
-        &ipa_instance,
-        &ipa_witness,
-        &mut transcript,
-      )?;
-
-      (ipa_proof, ipa_instance)
-    };
-
-    // claims from the end of sum-check
-    let (claim_Az, claim_Bz, claim_Cz): (E::Scalar, E::Scalar, E::Scalar) =
-      (claims_outer[1], claims_outer[2], claims_outer[3]);
-    transcript.absorb(b"claims_outer", &[claim_Az, claim_Bz, claim_Cz].as_slice());
-    info!(elapsed_ms = %sc_t.elapsed().as_millis(), "outer_sumcheck");
-
-    // inner sum-check preparation
-    let (_r_span, r_t) = start_span!("prepare_inner_claims");
-    let r = transcript.squeeze(b"r")?;
-    let claim_inner_joint = claim_Az + r * claim_Bz + r * r * claim_Cz;
-    info!(elapsed_ms = %r_t.elapsed().as_millis(), "prepare_inner_claims");
-
-    let (_eval_rx_span, eval_rx_t) = start_span!("compute_eval_rx");
-    let evals_rx = EqPolynomial::evals_from_points(&r_x.clone());
-    info!(elapsed_ms = %eval_rx_t.elapsed().as_millis(), "compute_eval_rx");
-
-    let (_sparse_span, sparse_t) = start_span!("compute_eval_table_sparse");
-    let (evals_A, evals_B, evals_C) = compute_eval_table_sparse(&pk.S, &evals_rx);
-    info!(elapsed_ms = %sparse_t.elapsed().as_millis(), "compute_eval_table_sparse");
-
-    let (_abc_span, abc_t) = start_span!("prepare_poly_ABC");
-    assert_eq!(evals_A.len(), evals_B.len());
-    assert_eq!(evals_A.len(), evals_C.len());
-    let poly_ABC = (0..evals_A.len())
-      .into_par_iter()
-      .map(|i| evals_A[i] + r * evals_B[i] + r * r * evals_C[i])
-      .collect::<Vec<E::Scalar>>();
-    info!(elapsed_ms = %abc_t.elapsed().as_millis(), "prepare_poly_ABC");
-
-    let (_z_span, z_t) = start_span!("prepare_poly_z");
-    let poly_z = {
-      z.resize(num_vars * 2, E::Scalar::ZERO);
-      z
-    };
-    info!(elapsed_ms = %z_t.elapsed().as_millis(), "prepare_poly_z");
-
-    // inner sum-check
-    let (_sc2_span, sc2_t) = start_span!("inner_sumcheck");
-
-    debug!("Proving inner sum-check with {} rounds", num_rounds_y);
-    debug!(
-      "Inner sum-check sizes - poly_ABC: {}, poly_z: {}",
-      poly_ABC.len(),
-      poly_z.len()
-    );
-    let comb_func = |poly_A_comp: &E::Scalar, poly_B_comp: &E::Scalar| -> E::Scalar {
-      *poly_A_comp * *poly_B_comp
-    };
-
-    let masks = inner_sumcheck_masks
-      .iter()
-      .flatten()
-      .copied()
-      .collect::<Vec<_>>();
-
-    let comm_masks =
-      <E as Engine>::GE::vartime_multiscalar_mul(&masks, &pk.ck.ck()[..masks.len()], true)?;
-    let r_a = E::Scalar::random(&mut OsRng);
-    let comm_masks = comm_masks + pk.ck.h() * r_a;
-
-    transcript.absorb(b"inner sumcheck masks", &comm_masks);
-
-    let (sc_proof_inner, r_y, _claims_inner, inner_lc_poly) = SumcheckProof::prove_quad(
-      &claim_inner_joint,
-      num_rounds_y,
-      &inner_sumcheck_masks,
-      &mut MultilinearPolynomial::new(poly_ABC),
-      &mut MultilinearPolynomial::new(poly_z),
-      comb_func,
-      &mut transcript,
-    )?;
-    info!(elapsed_ms = %sc2_t.elapsed().as_millis(), "inner_sumcheck");
-
-    let (ipa_proof_inner, ipa_instance_inner) = {
-      let mask_eval = masks
-        .iter()
-        .zip(inner_lc_poly.iter())
-        .map(|(mask, lc)| *mask * lc)
-        .sum();
-
-      let ipa_instance = InnerProductInstance::<E>::new(&comm_masks, &inner_lc_poly, &mask_eval);
-
-      let ipa_witness = InnerProductWitness::<E>::new(&masks, &r_a);
-
-      let ipa_proof = InnerProductArgumentLinear::<E>::prove(
-        &pk.ck.ck()[..masks.len()],
-        &pk.ck.h(),
-        &pk.ck.ck_s(),
-        &ipa_instance,
-        &ipa_witness,
-        &mut transcript,
-      )?;
-
-      (ipa_proof, ipa_instance)
-    };
-
-    let (_pcs_span, pcs_t) = start_span!("pcs_prove");
-    let U_regular = U.to_regular_instance()?;
-    let (eval_W, eval_arg) = E::PCS::prove(
-      &pk.ck,
-      &mut transcript,
-      &U_regular.comm_W,
-      &W.W,
-      &W.r_W,
-      &r_y[1..],
-    )?;
-    info!(elapsed_ms = %pcs_t.elapsed().as_millis(), "pcs_prove");
-
-    Ok(R1CSSNARK {
-      U,
-      sc_proof_outer,
-      ipa_proof_outer,
-      ipa_instance_outer,
-      claims_outer: (claim_Az, claim_Bz, claim_Cz),
-      sc_proof_inner,
-      ipa_proof_inner,
-      ipa_instance_inner,
-      eval_W,
-      eval_arg,
-    })
+    Self::prove_inner(pk, U, W, &mut transcript)
   }
 
   /// verifies a proof of satisfiability of a `RelaxedR1CS` instance
@@ -650,6 +408,265 @@ where
   }
 }
 
+impl<E: Engine<PCS = HyraxPCS<E>>> R1CSSNARK<E>
+where
+  E::GE: DlogGroupExt,
+  E::GE: PrimeCurve<Affine = <E::GE as DlogGroup>::AffineGroupElement, Scalar = E::Scalar>,
+  <E::GE as PrimeCurve>::Affine: Send + Sync + PrimeCurveAffine<Scalar = E::Scalar, Curve = E::GE>,
+{
+  ///
+  pub fn prove_inner(
+    pk: &<Self as R1CSSNARKTrait<E>>::ProverKey,
+    U: SplitR1CSInstance<E>,
+    W: R1CSWitness<E>,
+    transcript: &mut <E as Engine>::TE,
+  ) -> Result<Self, SpartanError> {
+    let num_vars = pk.S.num_shared + pk.S.num_precommitted + pk.S.num_rest;
+
+    let (num_rounds_x, num_rounds_y) = (
+      usize::try_from(pk.S.num_cons.ilog2()).unwrap(),
+      (usize::try_from(num_vars.ilog2()).unwrap() + 1),
+    );
+
+    let mut outer_sumcheck_masks = vec![];
+    for _ in 0..num_rounds_x {
+      let mask = [
+        E::Scalar::random(&mut OsRng),
+        E::Scalar::random(&mut OsRng),
+        E::Scalar::random(&mut OsRng),
+      ];
+      outer_sumcheck_masks.push(mask);
+    }
+
+    let mut inner_sumcheck_masks = vec![];
+    for _ in 0..num_rounds_y {
+      let mask = [E::Scalar::random(&mut OsRng), E::Scalar::random(&mut OsRng)];
+      inner_sumcheck_masks.push(mask);
+    }
+
+    // compute the full satisfying assignment by concatenating W.W, 1, and U.X
+    let mut z = [
+      W.W.clone(),
+      vec![E::Scalar::ONE],
+      U.public_values.clone(),
+      U.challenges.clone(),
+    ]
+    .concat();
+
+    let num_vars = pk.S.num_shared + pk.S.num_precommitted + pk.S.num_rest;
+    let (num_rounds_x, num_rounds_y) = (
+      usize::try_from(pk.S.num_cons.ilog2()).unwrap(),
+      (usize::try_from(num_vars.ilog2()).unwrap() + 1),
+    );
+
+    // outer sum-check preparation
+    let tau = (0..num_rounds_x)
+      .map(|_i| transcript.squeeze(b"t"))
+      .collect::<Result<EqPolynomial<_>, SpartanError>>()?;
+
+    let (_poly_tau_span, poly_tau_t) = start_span!("prepare_poly_tau");
+    let mut poly_tau = MultilinearPolynomial::new(tau.evals());
+    info!(elapsed_ms = %poly_tau_t.elapsed().as_millis(), "prepare_poly_tau");
+
+    let (_mv_span, mv_t) = start_span!("matrix_vector_multiply");
+    let (Az, Bz, Cz) = pk.S.multiply_vec(&z)?;
+    info!(
+      elapsed_ms = %mv_t.elapsed().as_millis(),
+      constraints = %pk.S.num_cons,
+      vars = %num_vars,
+      "matrix_vector_multiply"
+    );
+
+    let (_mp_span, mp_t) = start_span!("prepare_multilinear_polys");
+    let (mut poly_Az, mut poly_Bz, mut poly_Cz) = (
+      MultilinearPolynomial::new(Az),
+      MultilinearPolynomial::new(Bz),
+      MultilinearPolynomial::new(Cz),
+    );
+    info!(elapsed_ms = %mp_t.elapsed().as_millis(), "prepare_multilinear_polys");
+
+    // outer sum-check
+    let (_sc_span, sc_t) = start_span!("outer_sumcheck");
+
+    let comb_func_outer =
+      |poly_A_comp: &E::Scalar,
+       poly_B_comp: &E::Scalar,
+       poly_C_comp: &E::Scalar,
+       poly_D_comp: &E::Scalar|
+       -> E::Scalar { *poly_A_comp * (*poly_B_comp * *poly_C_comp - *poly_D_comp) };
+
+    let masks = outer_sumcheck_masks
+      .iter()
+      .flatten()
+      .copied()
+      .collect::<Vec<_>>();
+
+    let comm_masks =
+      <E as Engine>::GE::vartime_multiscalar_mul(&masks, &pk.ck.ck()[..masks.len()], true)?;
+    let r_a = E::Scalar::random(&mut OsRng);
+    let comm_masks = comm_masks + pk.ck.h() * r_a;
+
+    transcript.absorb(b"outer sumcheck masks", &comm_masks);
+
+    let (sc_proof_outer, r_x, claims_outer, outer_lc_poly) =
+      SumcheckProof::prove_cubic_with_additive_term(
+        &E::Scalar::ZERO, // claim is zero
+        num_rounds_x,
+        &outer_sumcheck_masks,
+        &mut poly_tau,
+        &mut poly_Az,
+        &mut poly_Bz,
+        &mut poly_Cz,
+        comb_func_outer,
+        transcript,
+      )?;
+
+    let (ipa_proof_outer, ipa_instance_outer) = {
+      let mask_eval = masks
+        .iter()
+        .zip(outer_lc_poly.iter())
+        .map(|(mask, lc)| *mask * lc)
+        .sum();
+
+      let ipa_instance = InnerProductInstance::<E>::new(&comm_masks, &outer_lc_poly, &mask_eval);
+
+      let ipa_witness = InnerProductWitness::<E>::new(&masks, &r_a);
+
+      let ipa_proof = InnerProductArgumentLinear::<E>::prove(
+        &pk.ck.ck()[..masks.len()],
+        &pk.ck.h(),
+        &pk.ck.ck_s(),
+        &ipa_instance,
+        &ipa_witness,
+        transcript,
+      )?;
+
+      (ipa_proof, ipa_instance)
+    };
+
+    // claims from the end of sum-check
+    let (claim_Az, claim_Bz, claim_Cz): (E::Scalar, E::Scalar, E::Scalar) =
+      (claims_outer[1], claims_outer[2], claims_outer[3]);
+    transcript.absorb(b"claims_outer", &[claim_Az, claim_Bz, claim_Cz].as_slice());
+    info!(elapsed_ms = %sc_t.elapsed().as_millis(), "outer_sumcheck");
+
+    // inner sum-check preparation
+    let (_r_span, r_t) = start_span!("prepare_inner_claims");
+    let r = transcript.squeeze(b"r")?;
+    let claim_inner_joint = claim_Az + r * claim_Bz + r * r * claim_Cz;
+    info!(elapsed_ms = %r_t.elapsed().as_millis(), "prepare_inner_claims");
+
+    let (_eval_rx_span, eval_rx_t) = start_span!("compute_eval_rx");
+    let evals_rx = EqPolynomial::evals_from_points(&r_x.clone());
+    info!(elapsed_ms = %eval_rx_t.elapsed().as_millis(), "compute_eval_rx");
+
+    let (_sparse_span, sparse_t) = start_span!("compute_eval_table_sparse");
+    let (evals_A, evals_B, evals_C) = compute_eval_table_sparse(&pk.S, &evals_rx);
+    info!(elapsed_ms = %sparse_t.elapsed().as_millis(), "compute_eval_table_sparse");
+
+    let (_abc_span, abc_t) = start_span!("prepare_poly_ABC");
+    assert_eq!(evals_A.len(), evals_B.len());
+    assert_eq!(evals_A.len(), evals_C.len());
+    let poly_ABC = (0..evals_A.len())
+      .into_par_iter()
+      .map(|i| evals_A[i] + r * evals_B[i] + r * r * evals_C[i])
+      .collect::<Vec<E::Scalar>>();
+    info!(elapsed_ms = %abc_t.elapsed().as_millis(), "prepare_poly_ABC");
+
+    let (_z_span, z_t) = start_span!("prepare_poly_z");
+    let poly_z = {
+      z.resize(num_vars * 2, E::Scalar::ZERO);
+      z
+    };
+    info!(elapsed_ms = %z_t.elapsed().as_millis(), "prepare_poly_z");
+
+    // inner sum-check
+    let (_sc2_span, sc2_t) = start_span!("inner_sumcheck");
+
+    debug!("Proving inner sum-check with {} rounds", num_rounds_y);
+    debug!(
+      "Inner sum-check sizes - poly_ABC: {}, poly_z: {}",
+      poly_ABC.len(),
+      poly_z.len()
+    );
+    let comb_func = |poly_A_comp: &E::Scalar, poly_B_comp: &E::Scalar| -> E::Scalar {
+      *poly_A_comp * *poly_B_comp
+    };
+
+    let masks = inner_sumcheck_masks
+      .iter()
+      .flatten()
+      .copied()
+      .collect::<Vec<_>>();
+
+    let comm_masks =
+      <E as Engine>::GE::vartime_multiscalar_mul(&masks, &pk.ck.ck()[..masks.len()], true)?;
+    let r_a = E::Scalar::random(&mut OsRng);
+    let comm_masks = comm_masks + pk.ck.h() * r_a;
+
+    transcript.absorb(b"inner sumcheck masks", &comm_masks);
+
+    let (sc_proof_inner, r_y, _claims_inner, inner_lc_poly) = SumcheckProof::prove_quad(
+      &claim_inner_joint,
+      num_rounds_y,
+      &inner_sumcheck_masks,
+      &mut MultilinearPolynomial::new(poly_ABC),
+      &mut MultilinearPolynomial::new(poly_z),
+      comb_func,
+      transcript,
+    )?;
+    info!(elapsed_ms = %sc2_t.elapsed().as_millis(), "inner_sumcheck");
+
+    let (ipa_proof_inner, ipa_instance_inner) = {
+      let mask_eval = masks
+        .iter()
+        .zip(inner_lc_poly.iter())
+        .map(|(mask, lc)| *mask * lc)
+        .sum();
+
+      let ipa_instance = InnerProductInstance::<E>::new(&comm_masks, &inner_lc_poly, &mask_eval);
+
+      let ipa_witness = InnerProductWitness::<E>::new(&masks, &r_a);
+
+      let ipa_proof = InnerProductArgumentLinear::<E>::prove(
+        &pk.ck.ck()[..masks.len()],
+        &pk.ck.h(),
+        &pk.ck.ck_s(),
+        &ipa_instance,
+        &ipa_witness,
+        transcript,
+      )?;
+
+      (ipa_proof, ipa_instance)
+    };
+
+    let (_pcs_span, pcs_t) = start_span!("pcs_prove");
+    let U_regular = U.to_regular_instance()?;
+    let (eval_W, eval_arg) = E::PCS::prove(
+      &pk.ck,
+      transcript,
+      &U_regular.comm_W,
+      &W.W,
+      &W.r_W,
+      &r_y[1..],
+    )?;
+    info!(elapsed_ms = %pcs_t.elapsed().as_millis(), "pcs_prove");
+
+    Ok(R1CSSNARK {
+      U,
+      sc_proof_outer,
+      ipa_proof_outer,
+      ipa_instance_outer,
+      claims_outer: (claim_Az, claim_Bz, claim_Cz),
+      sc_proof_inner,
+      ipa_proof_inner,
+      ipa_instance_inner,
+      eval_W,
+      eval_arg,
+    })
+  }
+}
+
 #[cfg(test)]
 mod tests {
   use super::*;
@@ -724,25 +741,84 @@ mod tests {
   #[test]
   fn test_snark() {
     type E = crate::provider::PallasHyraxEngine;
-    type S = R1CSSNARK<E>;
-    test_snark_with::<E, S>();
+    // type S = R1CSSNARK<E>;
+    test_snark_with::<E>();
 
     type E2 = crate::provider::T256HyraxEngine;
-    type S2 = R1CSSNARK<E2>;
-    test_snark_with::<E2, S2>();
+    // type S2 = R1CSSNARK<E2>;
+    test_snark_with::<E2>();
   }
 
-  fn test_snark_with<E: Engine, S: R1CSSNARKTrait<E>>() {
+  fn test_snark_with<E: Engine<PCS = HyraxPCS<E>>>()
+  where
+    E::GE: DlogGroupExt,
+    E::GE: PrimeCurve<Affine = <E::GE as DlogGroup>::AffineGroupElement, Scalar = E::Scalar>,
+    <E::GE as PrimeCurve>::Affine:
+      Send + Sync + PrimeCurveAffine<Scalar = E::Scalar, Curve = E::GE>,
+  {
     let circuit = CubicCircuit::default();
 
     // produce keys
-    let (pk, vk) = S::setup(circuit.clone()).unwrap();
+    let (pk, vk) = R1CSSNARK::<E>::setup(circuit.clone()).unwrap();
 
     // generate pre-processed state for proving
-    let prep_snark = S::prep_prove(&pk, circuit.clone(), false).unwrap();
+    let mut prep_snark = R1CSSNARK::<E>::prep_prove(&pk, circuit.clone(), false).unwrap();
+
+    let mut transcript = <E as Engine>::TE::new(b"R1CSSNARK");
+    transcript.absorb(b"vk", &pk.vk_digest);
+
+    let public_values = SpartanCircuit::<E>::public_values(&circuit)
+      .map_err(|e| SpartanError::SynthesisError {
+        reason: format!("Circuit does not provide public IO: {e}"),
+      })
+      .unwrap();
+
+    // absorb the public values into the transcript
+    transcript.absorb(b"public_values", &public_values.as_slice());
+
+    let (U, W) = SatisfyingAssignment::r1cs_instance_and_witness(
+      &mut prep_snark.ps,
+      &pk.S,
+      &pk.ck,
+      &circuit,
+      false,
+      &mut transcript,
+    )
+    .unwrap();
 
     // generate a witness and proof
-    let res = S::prove(&pk, circuit.clone(), &prep_snark, false);
+    let res = R1CSSNARK::<E>::prove_inner(&pk, U.clone(), W.clone(), &mut transcript);
+    // assert!(res.is_ok());
+    let snark = res.unwrap();
+
+    // verify the SNARK
+    let res = snark.verify(&vk);
+    // assert!(res.is_ok());
+    assert_eq!(res.unwrap(), [<E as Engine>::Scalar::from(15u64)]);
+
+    // Reblind instance and witness
+    let mut reblind_transcript = <E as Engine>::TE::new(b"R1CSSNARK");
+    reblind_transcript.absorb(b"vk", &pk.vk_digest);
+
+    let public_values = SpartanCircuit::<E>::public_values(&circuit)
+      .map_err(|e| SpartanError::SynthesisError {
+        reason: format!("Circuit does not provide public IO: {e}"),
+      })
+      .unwrap();
+
+    // absorb the public values into the reblind_transcript
+    reblind_transcript.absorb(b"public_values", &public_values.as_slice());
+
+    let (U, W) = SatisfyingAssignment::reblind_r1cs_instance_and_witness(
+      U,
+      W,
+      &pk.ck,
+      &mut reblind_transcript,
+    )
+    .unwrap();
+
+    // generate a witness and proof
+    let res = R1CSSNARK::<E>::prove_inner(&pk, U, W, &mut reblind_transcript);
     // assert!(res.is_ok());
     let snark = res.unwrap();
 

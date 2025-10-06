@@ -392,6 +392,7 @@ impl<E: Engine> SpartanWitness<E> for SatisfyingAssignment<E> {
       comm_W_rest,
       public_values,
       challenges,
+      None,
     )?;
 
     let mut blinds = Vec::with_capacity(3);

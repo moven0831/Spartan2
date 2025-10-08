@@ -3,6 +3,10 @@ use crate::{
   Blind, CommitmentKey, PCS, PartialCommitment,
   bellpepper::{shape_cs::ShapeCS, solver::SatisfyingAssignment},
   errors::SpartanError,
+  provider::{
+    pcs::hyrax_pc::HyraxPCS,
+    traits::{DlogGroup, DlogGroupExt},
+  },
   r1cs::{R1CSWitness, SparseMatrix, SplitR1CSInstance, SplitR1CSShape},
   start_span,
   traits::{
@@ -387,12 +391,13 @@ impl<E: Engine> SpartanWitness<E> for SatisfyingAssignment<E> {
       transcript.absorb(b"comm_W_precommitted", comm_W_precommitted);
     }
 
-    let challenges = (0..S.num_challenges)
-      .map(|_| transcript.squeeze(b"challenge"))
-      .collect::<Result<Vec<E::Scalar>, SpartanError>>()?;
+    // let challenges = (0..S.num_challenges)
+    //   .map(|_| transcript.squeeze(b"challenge"))
+    //   .collect::<Result<Vec<E::Scalar>, SpartanError>>()?;
+    let challenges = vec![];
 
     circuit
-      .synthesize(&mut ps.cs, &ps.shared, &ps.precommitted, Some(&challenges))
+      .synthesize(&mut ps.cs, &ps.shared, &ps.precommitted, None)
       .map_err(|e| SpartanError::SynthesisError {
         reason: format!("Unable to synthesize witness: {e}"),
       })?;
@@ -406,6 +411,7 @@ impl<E: Engine> SpartanWitness<E> for SatisfyingAssignment<E> {
       let blind_var = AllocatedNum::alloc(&mut ps.cs, || Ok(*blind)).unwrap();
       blind_vars.push(blind_var);
     }
+
     // blind_0 * 0 = 0
     ps.cs.enforce(
       || "blind_0 * 0 = 0",
@@ -455,6 +461,7 @@ impl<E: Engine> SpartanWitness<E> for SatisfyingAssignment<E> {
       comm_W_rest,
       public_values,
       challenges,
+      Some(blind_vars.try_into().unwrap()),
     )?;
 
     let mut blinds = Vec::with_capacity(3);
@@ -473,5 +480,91 @@ impl<E: Engine> SpartanWitness<E> for SatisfyingAssignment<E> {
     info!(elapsed_ms = %synth_t.elapsed().as_millis(), "circuit_synthesize_rest");
 
     Ok((U, W))
+  }
+}
+
+impl<E: Engine<PCS = HyraxPCS<E>>> SatisfyingAssignment<E> {
+  #[allow(unused)]
+  pub(crate) fn reblind_r1cs_instance_and_witness(
+    instance: SplitR1CSInstance<E>,
+    witness: R1CSWitness<E>,
+    ck: &CommitmentKey<E>,
+    transcript: &mut E::TE,
+  ) -> Result<(SplitR1CSInstance<E>, R1CSWitness<E>), SpartanError>
+  where
+    E::GE: DlogGroupExt,
+  {
+    let mut instance = instance.clone();
+    let mut witness = witness.clone();
+
+    let num_shared = instance.num_shared_rows();
+    let num_precommitted = instance.num_precommitted_rows();
+    let num_rest = instance.num_rest_rows();
+
+    let old_r = witness.r_W;
+    assert_eq!(num_shared + num_precommitted + num_rest, old_r.blind.len());
+
+    let r = PCS::<E>::blind(ck, old_r.blind.len());
+    let cs_blinds = PCS::<E>::blind(ck, 4);
+    let old_cs_blinds = instance.blind_vars_vals().unwrap();
+    let cs_blind_idxs = instance.blind_vars_idxs().unwrap();
+    let cs_blind_vars_pos = instance.blind_vars_pos().unwrap();
+
+    let comm_W_shared = instance.comm_W_shared.as_ref().map(|old_cm| {
+      let (old_r, r) = (&old_r.blind[..num_shared], &r.blind[..num_shared]);
+      HyraxPCS::reblind(ck, old_r, old_cm, r).unwrap()
+    });
+
+    let comm_W_precommitted = instance.comm_W_precommitted.as_ref().map(|old_cm| {
+      let (old_r, r) = (
+        &old_r.blind[num_shared..(num_shared + num_precommitted)],
+        &r.blind[num_shared..(num_shared + num_precommitted)],
+      );
+      HyraxPCS::reblind(ck, old_r, old_cm, r).unwrap()
+    });
+
+    // partial commitment to precommitted witness variables
+    if let Some(comm_W_shared) = &comm_W_shared {
+      transcript.absorb(b"comm_W_shared", comm_W_shared);
+    }
+    if let Some(comm_W_precommitted) = &comm_W_precommitted {
+      transcript.absorb(b"comm_W_precommitted", comm_W_precommitted);
+    }
+
+    let comm_W_rest = {
+      let mut old_cm = instance.comm_W_rest;
+      cs_blinds
+        .blind
+        .iter()
+        .zip(old_cs_blinds.iter())
+        .zip(cs_blind_vars_pos.iter())
+        .for_each(|((cs_blind, old_cs_blind), (row, col))| {
+          let generator = ck.ck()[*col];
+          let blind_adjustment = E::GE::group(&generator) * (*cs_blind - old_cs_blind);
+          old_cm.comm[*row] += blind_adjustment;
+        });
+
+      let (old_r, r) = (
+        &old_r.blind[(num_shared + num_precommitted)..],
+        &r.blind[(num_shared + num_precommitted)..],
+      );
+      HyraxPCS::reblind(ck, old_r, &old_cm, r)?
+    };
+    transcript.absorb(b"comm_W_rest", &comm_W_rest); // add commitment to transcript
+
+    instance.comm_W_shared = comm_W_shared;
+    instance.comm_W_precommitted = comm_W_precommitted;
+    instance.comm_W_rest = comm_W_rest;
+
+    witness.r_W = r;
+    cs_blinds
+      .blind
+      .iter()
+      .zip(cs_blind_idxs.iter())
+      .for_each(|(cs_blind, idx)| {
+        witness.W[*idx] = *cs_blind;
+      });
+
+    Ok((instance, witness))
   }
 }

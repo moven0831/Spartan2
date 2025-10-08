@@ -98,14 +98,14 @@ where
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(bound = "")]
 pub struct HyraxCommitment<E: Engine> {
-  comm: Vec<E::GE>,
+  pub(crate) comm: Vec<E::GE>,
 }
 
 /// Structure that holds blinds
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(bound = "")]
 pub struct HyraxBlind<E: Engine> {
-  blind: Vec<E::Scalar>,
+  pub(crate) blind: Vec<E::Scalar>,
 }
 
 /// Provides a commitment engine
@@ -404,6 +404,32 @@ where
 
     info!(elapsed_ms = %verify_t.elapsed().as_millis(), "hyrax_pcs_verify");
     result
+  }
+}
+
+impl<E: Engine> HyraxPCS<E>
+where
+  E::GE: DlogGroupExt,
+{
+  #[allow(unused)]
+  pub(crate) fn reblind(
+    ck: &<Self as PCSEngineTrait<E>>::CommitmentKey,
+    old_r: &[E::Scalar],
+    old_cm: &HyraxCommitment<E>,
+    new_r: &[E::Scalar],
+  ) -> Result<HyraxCommitment<E>, SpartanError> {
+    // [ C_1, C_2, ... ] = [ W_1 + r_1 H, W_2 + r_2 H, ... ]
+    // for i
+    //   C'_i = C_i + (r'_i - r_i) H // == W_i + r'_i H
+    Ok(HyraxCommitment {
+      comm: old_cm
+        .comm
+        .iter()
+        .zip(old_r.iter())
+        .zip(new_r.iter())
+        .map(|((&cm, old_r), &new_r)| cm + <E::GE as DlogGroup>::group(&ck.h) * (new_r - old_r))
+        .collect(),
+    })
   }
 }
 

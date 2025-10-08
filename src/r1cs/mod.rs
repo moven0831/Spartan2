@@ -3,6 +3,7 @@ use crate::{
   Blind, Commitment, CommitmentKey, PCS, PartialCommitment, VerifierKey,
   digest::SimpleDigestible,
   errors::SpartanError,
+  provider::{pcs::hyrax_pc::HyraxPCS, traits::DlogGroupExt},
   start_span,
   traits::{
     Engine,
@@ -10,8 +11,10 @@ use crate::{
     transcript::{TranscriptEngineTrait, TranscriptReprTrait},
   },
 };
+use bellpepper_core::{Index, num::AllocatedNum};
 use core::cmp::max;
 use ff::Field;
+use num_integer::div_ceil;
 use once_cell::sync::OnceCell;
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
@@ -475,12 +478,18 @@ pub struct SplitR1CSShape<E: Engine> {
 impl<E: Engine> SimpleDigestible for SplitR1CSShape<E> {}
 
 /// A type that holds a split R1CS instance
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(bound = "")]
 pub struct SplitR1CSInstance<E: Engine> {
   pub(crate) comm_W_shared: Option<PartialCommitment<E>>,
   pub(crate) comm_W_precommitted: Option<PartialCommitment<E>>,
   pub(crate) comm_W_rest: PartialCommitment<E>,
+
+  pub(crate) num_shared: usize,
+  pub(crate) num_precommitted: usize,
+  pub(crate) num_rest: usize,
+
+  pub(crate) blind_vars: Option<[AllocatedNum<E::Scalar>; 4]>,
 
   pub(crate) public_values: Vec<E::Scalar>,
   pub(crate) challenges: Vec<E::Scalar>,
@@ -738,6 +747,7 @@ impl<E: Engine> SplitR1CSInstance<E> {
     comm_W_rest: PartialCommitment<E>,
     public_values: Vec<E::Scalar>,
     challenges: Vec<E::Scalar>,
+    blind_vars: Option<[AllocatedNum<E::Scalar>; 4]>,
   ) -> Result<SplitR1CSInstance<E>, SpartanError> {
     if public_values.len() != S.num_public {
       return Err(SpartanError::InvalidInputLength {
@@ -782,8 +792,12 @@ impl<E: Engine> SplitR1CSInstance<E> {
       comm_W_shared,
       comm_W_precommitted,
       comm_W_rest,
+      num_shared: S.num_shared,
+      num_precommitted: S.num_precommitted,
+      num_rest: S.num_rest,
       public_values,
       challenges,
+      blind_vars,
     })
   }
 
@@ -850,5 +864,66 @@ impl<E: Engine> SplitR1CSInstance<E> {
       comm_W,
       X: [self.public_values.clone(), self.challenges.clone()].concat(),
     })
+  }
+}
+
+impl<E: Engine<PCS = HyraxPCS<E>>> SplitR1CSInstance<E>
+where
+  E::GE: DlogGroupExt,
+{
+  pub fn blind_vars_idxs(&self) -> Option<[usize; 4]> {
+    self.blind_vars.as_ref().map(|blind_vars| {
+      blind_vars
+        .iter()
+        .map(|blind_var| match blind_var.get_variable().0 {
+          Index::Aux(idx) => idx,
+          _ => unreachable!(),
+        })
+        .collect::<Vec<_>>()
+        .try_into()
+        .unwrap()
+    })
+  }
+
+  pub fn blind_vars_vals(&self) -> Option<[E::Scalar; 4]> {
+    self.blind_vars.as_ref().map(|blind_vars| {
+      blind_vars
+        .iter()
+        .map(|blind_var| blind_var.get_value().unwrap())
+        .collect::<Vec<_>>()
+        .try_into()
+        .unwrap()
+    })
+  }
+  pub fn blind_vars_pos(&self) -> Option<[(usize, usize); 4]> {
+    self.blind_vars.as_ref().map(|blind_vars| {
+      blind_vars
+        .iter()
+        .map(|blind_var| {
+          let index = match blind_var.get_variable().0 {
+            Index::Aux(idx) => idx,
+            _ => unimplemented!(),
+          };
+          let rest_index = index - self.num_shared - self.num_precommitted;
+          let row = rest_index / E::PCS::width();
+          let col = rest_index % E::PCS::width();
+          (row, col)
+        })
+        .collect::<Vec<_>>()
+        .try_into()
+        .unwrap()
+    })
+  }
+
+  pub fn num_shared_rows(&self) -> usize {
+    div_ceil(self.num_shared, HyraxPCS::<E>::width())
+  }
+
+  pub fn num_precommitted_rows(&self) -> usize {
+    div_ceil(self.num_precommitted, HyraxPCS::<E>::width())
+  }
+
+  pub fn num_rest_rows(&self) -> usize {
+    div_ceil(self.num_rest, HyraxPCS::<E>::width())
   }
 }

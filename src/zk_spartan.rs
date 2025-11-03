@@ -1,7 +1,7 @@
 //! This module implements the spartan SNARK protocol.
 //! It provides the prover and verifier keys, as well as the SNARK itself.
 use crate::{
-  CommitmentKey,
+  CommitmentKey, PartialCommitment,
   bellpepper::{
     shape_cs::ShapeCS,
     solver::SatisfyingAssignment,
@@ -414,6 +414,10 @@ where
   E::GE: PrimeCurve<Affine = <E::GE as DlogGroup>::AffineGroupElement, Scalar = E::Scalar>,
   <E::GE as PrimeCurve>::Affine: Send + Sync + PrimeCurveAffine<Scalar = E::Scalar, Curve = E::GE>,
 {
+  ///
+  pub fn comm_W_shared(&self) -> &Option<PartialCommitment<E>> {
+    &self.U.comm_W_shared
+  }
   ///
   pub fn prove_inner(
     pk: &<Self as R1CSSNARKTrait<E>>::ProverKey,

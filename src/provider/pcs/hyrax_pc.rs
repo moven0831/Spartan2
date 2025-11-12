@@ -98,14 +98,14 @@ where
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(bound = "")]
 pub struct HyraxCommitment<E: Engine> {
-  pub(crate) comm: Vec<E::GE>,
+  pub comm: Vec<E::GE>,
 }
 
 /// Structure that holds blinds
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(bound = "")]
 pub struct HyraxBlind<E: Engine> {
-  pub(crate) blind: Vec<E::Scalar>,
+  pub blind: Vec<E::Scalar>,
 }
 
 /// Provides a commitment engine

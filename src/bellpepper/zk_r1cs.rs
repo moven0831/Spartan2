@@ -485,7 +485,8 @@ impl<E: Engine> SpartanWitness<E> for SatisfyingAssignment<E> {
 
 impl<E: Engine<PCS = HyraxPCS<E>>> SatisfyingAssignment<E> {
   #[allow(unused)]
-  pub(crate) fn reblind_r1cs_instance_and_witness(
+  pub fn reblind_r1cs_instance_and_witness(
+    new_r_shared: &[<E as Engine>::Scalar],
     instance: SplitR1CSInstance<E>,
     witness: R1CSWitness<E>,
     ck: &CommitmentKey<E>,
@@ -501,14 +502,15 @@ impl<E: Engine<PCS = HyraxPCS<E>>> SatisfyingAssignment<E> {
     let num_precommitted = instance.num_precommitted_rows();
     let num_rest = instance.num_rest_rows();
 
+    assert_eq!(new_r_shared.len(), num_shared);
+
     let old_r = witness.r_W;
     assert_eq!(num_shared + num_precommitted + num_rest, old_r.blind.len());
 
-    let r = PCS::<E>::blind(ck, old_r.blind.len());
-    let cs_blinds = PCS::<E>::blind(ck, 4);
-    let old_cs_blinds = instance.blind_vars_vals().unwrap();
-    let cs_blind_idxs = instance.blind_vars_idxs().unwrap();
-    let cs_blind_vars_pos = instance.blind_vars_pos().unwrap();
+    let mut r = PCS::<E>::blind(ck, witness.W.len());
+    for idx in 0..num_shared {
+      r.blind[idx] = new_r_shared[idx];
+    }
 
     let comm_W_shared = instance.comm_W_shared.as_ref().map(|old_cm| {
       let (old_r, r) = (&old_r.blind[..num_shared], &r.blind[..num_shared]);
@@ -531,17 +533,34 @@ impl<E: Engine<PCS = HyraxPCS<E>>> SatisfyingAssignment<E> {
       transcript.absorb(b"comm_W_precommitted", comm_W_precommitted);
     }
 
+    let cs_blinds = [
+      E::Scalar::random(OsRng),
+      E::Scalar::random(OsRng),
+      E::Scalar::random(OsRng),
+      E::Scalar::random(OsRng),
+    ];
+    let old_cs_blinds = instance.blind_vars_vals().unwrap();
+    let cs_blinds_idxs_in_W: Vec<_> = old_cs_blinds
+      .iter()
+      .map(|old_cs_blind| witness.W.iter().position(|&x| x == *old_cs_blind).unwrap())
+      .collect();
+    let cs_blinds_pos_in_cm = cs_blinds_idxs_in_W.iter().map(|idx| {
+      let rest_index = idx - instance.num_shared - instance.num_precommitted;
+      let row = rest_index / E::PCS::width();
+      let col = rest_index % E::PCS::width();
+      (row, col)
+    });
+
     let comm_W_rest = {
       let mut old_cm = instance.comm_W_rest;
       cs_blinds
-        .blind
         .iter()
         .zip(old_cs_blinds.iter())
-        .zip(cs_blind_vars_pos.iter())
+        .zip(cs_blinds_pos_in_cm)
         .for_each(|((cs_blind, old_cs_blind), (row, col))| {
-          let generator = ck.ck()[*col];
+          let generator = ck.ck()[col];
           let blind_adjustment = E::GE::group(&generator) * (*cs_blind - old_cs_blind);
-          old_cm.comm[*row] += blind_adjustment;
+          old_cm.comm[row] += blind_adjustment;
         });
 
       let (old_r, r) = (
@@ -557,13 +576,10 @@ impl<E: Engine<PCS = HyraxPCS<E>>> SatisfyingAssignment<E> {
     instance.comm_W_rest = comm_W_rest;
 
     witness.r_W = r;
-    cs_blinds
-      .blind
-      .iter()
-      .zip(cs_blind_idxs.iter())
-      .for_each(|(cs_blind, idx)| {
-        witness.W[*idx] = *cs_blind;
-      });
+
+    for (W_idx, cs_blind) in cs_blinds_idxs_in_W.iter().zip(cs_blinds.iter()) {
+      witness.W[*W_idx] = *cs_blind;
+    }
 
     Ok((instance, witness))
   }

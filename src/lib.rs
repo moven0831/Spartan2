@@ -7,7 +7,7 @@
   future_incompatible,
   nonstandard_style,
   rust_2018_idioms,
-  missing_docs
+  // missing_docs
 )]
 #![allow(non_snake_case)]
 #![allow(clippy::upper_case_acronyms)]
@@ -16,7 +16,7 @@
 
 // private modules
 mod math;
-mod r1cs;
+pub mod r1cs;
 
 #[macro_use]
 mod macros;

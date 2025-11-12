@@ -64,8 +64,8 @@ impl<E: Engine> SimpleDigestible for R1CSShape<E> {}
 #[serde(bound = "")]
 pub struct R1CSWitness<E: Engine> {
   pub(crate) is_small: bool, // whether the witness elements fit in machine words
-  pub(crate) W: Vec<E::Scalar>,
-  pub(crate) r_W: Blind<E>,
+  pub W: Vec<E::Scalar>,
+  pub r_W: Blind<E>,
 }
 
 /// A type that holds an R1CS instance
@@ -481,7 +481,7 @@ impl<E: Engine> SimpleDigestible for SplitR1CSShape<E> {}
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(bound = "")]
 pub struct SplitR1CSInstance<E: Engine> {
-  pub(crate) comm_W_shared: Option<PartialCommitment<E>>,
+  pub comm_W_shared: Option<PartialCommitment<E>>,
   pub(crate) comm_W_precommitted: Option<PartialCommitment<E>>,
   pub(crate) comm_W_rest: PartialCommitment<E>,
 
@@ -871,6 +871,7 @@ impl<E: Engine<PCS = HyraxPCS<E>>> SplitR1CSInstance<E>
 where
   E::GE: DlogGroupExt,
 {
+  ///
   pub fn blind_vars_idxs(&self) -> Option<[usize; 4]> {
     self.blind_vars.as_ref().map(|blind_vars| {
       blind_vars
@@ -885,6 +886,7 @@ where
     })
   }
 
+  ///
   pub fn blind_vars_vals(&self) -> Option<[E::Scalar; 4]> {
     self.blind_vars.as_ref().map(|blind_vars| {
       blind_vars
@@ -895,6 +897,8 @@ where
         .unwrap()
     })
   }
+
+  ///
   pub fn blind_vars_pos(&self) -> Option<[(usize, usize); 4]> {
     self.blind_vars.as_ref().map(|blind_vars| {
       blind_vars
@@ -915,14 +919,17 @@ where
     })
   }
 
+  ///
   pub fn num_shared_rows(&self) -> usize {
     div_ceil(self.num_shared, HyraxPCS::<E>::width())
   }
 
+  ///
   pub fn num_precommitted_rows(&self) -> usize {
     div_ceil(self.num_precommitted, HyraxPCS::<E>::width())
   }
 
+  ///
   pub fn num_rest_rows(&self) -> usize {
     div_ceil(self.num_rest, HyraxPCS::<E>::width())
   }

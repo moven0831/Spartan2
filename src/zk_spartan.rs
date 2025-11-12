@@ -45,9 +45,12 @@ use tracing::{debug, info, info_span};
 #[derive(Serialize, Deserialize)]
 #[serde(bound = "")]
 pub struct SpartanProverKey<E: Engine> {
-  ck: CommitmentKey<E>,
-  S: SplitR1CSShape<E>,
-  vk_digest: SpartanDigest, // digest of the verifier's key
+  ///
+  pub ck: CommitmentKey<E>,
+  ///
+  pub S: SplitR1CSShape<E>,
+  ///
+  pub vk_digest: SpartanDigest, // digest of the verifier's key
 }
 
 impl<E: Engine> SpartanProverKey<E> {
@@ -134,7 +137,8 @@ pub(crate) fn compute_eval_table_sparse<E: Engine>(
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(bound = "")]
 pub struct PrepSNARK<E: Engine> {
-  ps: PrecommittedState<E>,
+  ///
+  pub ps: PrecommittedState<E>,
 }
 
 /// A succinct proof of knowledge of a witness to a relaxed R1CS instance
@@ -230,7 +234,7 @@ where
       &mut transcript,
     )?;
 
-    Self::prove_inner(pk, U, W, &mut transcript)
+    Self::prove_inner(pk, &U, &W, &mut transcript)
   }
 
   /// verifies a proof of satisfiability of a `RelaxedR1CS` instance
@@ -421,8 +425,8 @@ where
   ///
   pub fn prove_inner(
     pk: &<Self as R1CSSNARKTrait<E>>::ProverKey,
-    U: SplitR1CSInstance<E>,
-    W: R1CSWitness<E>,
+    U: &SplitR1CSInstance<E>,
+    W: &R1CSWitness<E>,
     transcript: &mut <E as Engine>::TE,
   ) -> Result<Self, SpartanError> {
     let num_vars = pk.S.num_shared + pk.S.num_precommitted + pk.S.num_rest;
@@ -657,7 +661,7 @@ where
     info!(elapsed_ms = %pcs_t.elapsed().as_millis(), "pcs_prove");
 
     Ok(R1CSSNARK {
-      U,
+      U: U.clone(),
       sc_proof_outer,
       ipa_proof_outer,
       ipa_instance_outer,
@@ -791,7 +795,7 @@ mod tests {
     .unwrap();
 
     // generate a witness and proof
-    let res = R1CSSNARK::<E>::prove_inner(&pk, U.clone(), W.clone(), &mut transcript);
+    let res = R1CSSNARK::<E>::prove_inner(&pk, &U, &W, &mut transcript);
     // assert!(res.is_ok());
     let snark = res.unwrap();
 
@@ -813,7 +817,11 @@ mod tests {
     // absorb the public values into the reblind_transcript
     reblind_transcript.absorb(b"public_values", &public_values.as_slice());
 
+    let new_r_shared = (0..U.num_shared_rows())
+      .map(|_| E::Scalar::random(OsRng))
+      .collect::<Vec<_>>();
     let (U, W) = SatisfyingAssignment::reblind_r1cs_instance_and_witness(
+      &new_r_shared,
       U,
       W,
       &pk.ck,
@@ -822,7 +830,7 @@ mod tests {
     .unwrap();
 
     // generate a witness and proof
-    let res = R1CSSNARK::<E>::prove_inner(&pk, U, W, &mut reblind_transcript);
+    let res = R1CSSNARK::<E>::prove_inner(&pk, &U, &W, &mut reblind_transcript);
     // assert!(res.is_ok());
     let snark = res.unwrap();
 

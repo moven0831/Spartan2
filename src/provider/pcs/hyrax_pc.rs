@@ -412,7 +412,7 @@ where
   E::GE: DlogGroupExt,
 {
   #[allow(unused)]
-  pub(crate) fn reblind(
+  pub fn reblind(
     ck: &<Self as PCSEngineTrait<E>>::CommitmentKey,
     old_r: &[E::Scalar],
     old_cm: &HyraxCommitment<E>,
